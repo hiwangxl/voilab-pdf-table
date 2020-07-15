@@ -1,5 +1,5 @@
 
-2020-07-15 新增功能：分别设置表格header和内容的样式，详见demo文件夹
+2020-07-15 新增功能：分别设置表格header和内容的样式，参数为headerStyles和commonStyles，详见demo文件夹
 
 
 Voilab Pdf Table
