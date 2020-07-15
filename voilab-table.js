@@ -2,10 +2,13 @@
 'use strict';
 
 var lodash = require('lodash'),
+    path = require('path'),
+    fontpath = path.resolve(__dirname, './pdfRelay', 'PingFangMedium.ttf'),
+    fontBoldPath = path.resolve(__dirname, './pdfRelay', 'PingFangHeavy.ttf'),
     EventEmitter = require('events').EventEmitter,
 
     getPaddingValue = function (direction, p) {
-        var l =  p && p.length;
+        var l = p && p.length;
         if (direction === 'vertical' || direction === 'horizontal') {
             if (l === 1) {
                 return p[0] * 2;
@@ -42,14 +45,31 @@ var lodash = require('lodash'),
     addCellBackground = function (self, column, row, pos, index, isHeader) {
         self.emitter.emit('cell-background-add', self, column, row, index, isHeader);
 
-        self.pdf
-            .rect(pos.x, pos.y, column.width, row._renderedContent.height)
-            .fill();
+        //@wangxl
+        let commonStyles = column.commonStyles,
+            bgcolor = commonStyles.backgroundColor || "#fff",
+            color = commonStyles.color || "#333",
+            headerStyles = column.headerStyles,
+            h_bgcolor = headerStyles.backgroundColor || bgcolor,
+            h_color = headerStyles.color || color;
+
+        if (isHeader) {
+            self.pdf
+                .rect(pos.x, pos.y, column.width, row._renderedContent.height)
+                .fill(h_bgcolor)
+                .fillColor(h_color);
+        } else {
+            self.pdf
+                .rect(pos.x, pos.y, column.width, row._renderedContent.height)
+                .fill(bgcolor)
+                .fillColor(color);
+        }
 
         self.emitter.emit('cell-background-added', self, column, row, index, isHeader);
     },
 
-    addCellBorder = function (self, column, row, pos, isHeader) {
+    h_topy = "",
+    addCellBorder = function (self, column, row, pos, index, isHeader) {
         self.emitter.emit('cell-border-add', self, column, row, isHeader);
 
         var border = isHeader ? column.headerBorder : column.border,
@@ -57,9 +77,29 @@ var lodash = require('lodash'),
                 x: pos.x + column.width,
                 y: pos.y + row._renderedContent.height
             },
-            doStroke = function () {
+            doStroke = function (h_b_color) {
+                //@wangxl
+                if (isHeader) {
+                    h_topy = bpos.y;
+                }
                 var opacity = (!isHeader && column.borderOpacity) || (isHeader && column.headerBorderOpacity);
-                self.pdf.lineCap('square').opacity(opacity || 1).stroke().restore();
+                let { commonStyles, headerStyles } = column;
+                if (commonStyles || headerStyles) {
+                    let width = commonStyles.borderWidth || 1,
+                        h_width = headerStyles.borderWidth || width,
+                        h_b_width = headerStyles.borderBtoomWidth || h_width;
+                    if (isHeader) {
+                        self.pdf.lineCap('square').opacity(opacity || 1).lineWidth(h_width).stroke().restore();
+                    } else {
+                        if ((pos.y === h_topy) && h_b_color) {
+                            self.pdf.lineCap('square').opacity(opacity || 1).lineWidth(h_b_width).stroke(h_b_color).restore();
+                        } else {
+                            self.pdf.lineCap('square').opacity(opacity || 1).lineWidth(width).stroke().restore();
+                        }
+                    }
+                } else {
+                    self.pdf.lineCap('square').opacity(opacity || 1).stroke().restore();
+                }
             };
 
         if (border.indexOf('L') !== -1) {
@@ -68,7 +108,13 @@ var lodash = require('lodash'),
         }
         if (border.indexOf('T') !== -1) {
             self.pdf.save().moveTo(pos.x, pos.y).lineTo(bpos.x, pos.y);
-            doStroke();
+            // @wangxl
+            let headerStyles = column.headerStyles,
+                h_b_color = "";
+            if (headerStyles && headerStyles["headerBottomColor"]) {
+                h_b_color = headerStyles["headerBottomColor"];
+            }
+            doStroke(h_b_color);
         }
         if (border.indexOf('B') !== -1) {
             self.pdf.save().moveTo(pos.x, bpos.y).lineTo(bpos.x, bpos.y);
@@ -131,10 +177,34 @@ var lodash = require('lodash'),
             y += (row._renderedContent.height - row._renderedContent.contentHeight[column.id]);
         }
 
-        self.pdf.text(data, x, y, lodash.assign({}, column, {
-            height: row._renderedContent.height,
-            width: width
-        }));
+        //@wangxl
+        let { commonStyles, headerStyles } = column, fontWeight, h_fontWeight;
+        if (commonStyles || headerStyles) {
+            let { fontSize, color } = commonStyles;
+            let h_fontSize = headerStyles.fontSize || fontSize,
+                h_color = headerStyles.color || color;
+            fontWeight = commonStyles.fontWeight;
+            h_fontWeight = headerStyles.fontWeight || fontWeight;
+            if (isHeader) {
+                if (h_fontSize) self.pdf.fontSize(h_fontSize);
+                if (h_color) self.pdf.fillColor(h_color);
+            } else {
+                if (fontSize) self.pdf.fontSize(fontSize);
+                if (color) self.pdf.fillColor(color);
+            }
+        }
+        if ((isHeader && h_fontWeight === "bold") || (!isHeader && fontWeight === "bold")) {
+            self.pdf.font(fontBoldPath).text(data, x, y, lodash.assign({}, column, {
+                height: row._renderedContent.height,
+                width: width
+            }));
+        } else {
+            self.pdf.font(fontpath).text(data, x, y, lodash.assign({}, column, {
+                height: row._renderedContent.height,
+                width: width
+            }));
+        }
+
 
         cellAdded && cellAdded(self, row, column, { x: x, y: self.pdf.y, baseY: y }, padding, isHeader);
 
@@ -143,18 +213,31 @@ var lodash = require('lodash'),
 
     addRow = function (self, row, index, isHeader) {
         var pos = {
-                x: self.pos.x || self.pdf.page.margins.left,
-                y: self.pdf.y
-            },
+            x: self.pos.x || self.pdf.page.margins.left,
+            y: self.pdf.y
+        },
             ev = {
                 cancel: false
             };
 
         // the content might be higher than the remaining height on the page.
-        if (self.pdf.y + row._renderedContent.height > (self.pos.maxY || (self.pdf.page.height - self.pdf.page.margins.bottom) - self.bottomMargin)) {
+        let pageHeightCount = self.pdf.y + row._renderedContent.height,//y+元素高度
+            clientHeight = (self.pdf.page.height - self.pdf.page.margins.bottom) - self.bottomMargin;//页面高度-marginBottom
+        // || (isHeader && pageHeightCount > (clientHeight - 100))
+        if (pageHeightCount > (self.pos.maxY || clientHeight)) {
             self.emitter.emit('page-add', self, row, ev);
             if (!ev.cancel) {
                 self.pdf.addPage();
+
+                //@wangxl
+                let commonStyles = self.columnsDefaults.commonStyles;
+                if (commonStyles) {
+                    let { borderColor, color, fontSize } = commonStyles;
+                    if (fontSize) self.pdf.fontSize(fontSize);
+                    if (borderColor) self.pdf.fillAndStroke(borderColor);
+                    if (color) self.pdf.fillColor(color);
+                }
+
                 // Reset Y position for next page
                 pos.y = self.pos.y || self.pdf.page.margins.top;
             }
@@ -164,11 +247,11 @@ var lodash = require('lodash'),
         }
 
         lodash.forEach(self.getColumns(), function (column) {
-            if ((!isHeader && column.fill) || (isHeader && column.headerFill)) {
+            if (column.commonStyles || (!isHeader && column.fill) || (isHeader && (column.headerFill || column.headerStyles))) {
                 addCellBackground(self, column, row, pos, index, isHeader);
             }
-            if ((!isHeader && column.border) || (isHeader && column.headerBorder)) {
-                addCellBorder(self, column, row, pos, isHeader);
+            if (column.commonStyles || (!isHeader && column.border) || (isHeader && (column.headerBorder || column.headerStyles))) {
+                addCellBorder(self, column, row, pos, index, isHeader);
             }
             addCell(self, column, row, pos, isHeader);
         });
@@ -179,16 +262,26 @@ var lodash = require('lodash'),
     setRowHeight = function (self, row, isHeader) {
         var max_height = 0;
 
-        row._renderedContent = {data: {}, dataHeight: {}, contentHeight: {}};
+        row._renderedContent = { data: {}, dataHeight: {}, contentHeight: {} };
 
         lodash.forEach(self.getColumns(), function (column) {
+            //@wangxl
+            let { commonStyles, headerStyles } = column;
+            if (commonStyles || headerStyles) {
+                let fontSize = commonStyles.fontSize,
+                    h_fontSize = headerStyles.fontSize || fontSize;
+                if (isHeader) {
+                    if (h_fontSize) self.pdf.fontSize(h_fontSize);
+                } else {
+                    if (fontSize) self.pdf.fontSize(fontSize);
+                }
+            }
             var renderer = isHeader ? column.headerRenderer : column.renderer,
                 content = renderer ? renderer(self, row, false, column) : row[column.id],
                 height = !content || column.ellipsis ? 1 : self.pdf.heightOfString(content, lodash.assign(lodash.clone(column), {
                     width: column.width - getPaddingValue('horizontal', column.padding)
                 })),
                 column_height = isHeader ? column.headerHeight : column.height;
-
             // Setup the content height
             row._renderedContent.contentHeight[column.id] = height;
 
@@ -198,7 +291,6 @@ var lodash = require('lodash'),
             } else {
                 height += getPaddingValue('vertical', column.padding);
             }
-
             if (height < column_height) {
                 height = column_height;
             }
@@ -549,7 +641,7 @@ lodash.assign(PdfTable.prototype, {
      * @return {Object} the instanciated plugin
      */
     getPlugin: function (id) {
-        return lodash.find(this.plugins, {id: id});
+        return lodash.find(this.plugins, { id: id });
     },
 
     /**
@@ -559,7 +651,7 @@ lodash.assign(PdfTable.prototype, {
      * @return {PdfTable}
      */
     removePlugin: function (id) {
-        lodash.remove(this.plugins, {id: id});
+        lodash.remove(this.plugins, { id: id });
         return this;
     },
 
@@ -697,7 +789,7 @@ lodash.assign(PdfTable.prototype, {
      * @return {Object}
      */
     getColumn: function (columnId) {
-        return lodash.find(this.columns, {id: columnId});
+        return lodash.find(this.columns, { id: columnId });
     },
 
     /**
